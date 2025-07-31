@@ -1,0 +1,17 @@
+# 跨平台微信发送服务依赖
+
+# 核心依赖（所有平台）
+flask>=2.3.0
+requests>=2.31.0
+
+# Windows特定依赖
+wxauto>=3.0.0; sys_platform == "win32"
+pywin32>=306; sys_platform == "win32"
+
+# 可选依赖（录制功能）
+playwright>=1.40.0
+
+# macOS用户注意事项：
+# 1. 确保系统偏好设置 -> 安全性与隐私 -> 辅助功能 中已启用终端或Python的访问权限
+# 2. 确保微信已安装在 /Applications/WeChat.app
+# 3. 运行前需要手动打开微信并登录
