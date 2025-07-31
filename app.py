@@ -22,6 +22,66 @@ def sanitize_filename(name):
     # 替换掉 Windows 不允许的字符：\ / : * ? " < > |
     return re.sub(r'[\\/:*?"<>|]', "_", name)
 
+def convert_video_to_mp4(input_path, output_path):
+    """将视频文件转换为MP4格式"""
+    try:
+        import ffmpeg
+        
+        print(f"开始转换视频: {input_path} -> {output_path}")
+        
+        # 检查输入文件是否存在
+        if not os.path.exists(input_path):
+            raise Exception(f"输入视频文件不存在: {input_path}")
+        
+        # 使用ffmpeg-python进行转换
+        (
+            ffmpeg
+            .input(input_path)
+            .output(output_path, 
+                   vcodec='libx264',    # H.264编码
+                   acodec='aac',        # AAC音频编码
+                   **{'crf': 23})       # 质量设置（0-51，23是默认值）
+            .overwrite_output()         # 覆盖输出文件
+            .run(capture_stdout=True, capture_stderr=True)
+        )
+        
+        print(f"✅ 视频转换完成: {output_path}")
+        return True
+        
+    except ImportError:
+        print("❌ 缺少ffmpeg-python依赖，请安装: pip install ffmpeg-python")
+        print("❌ 同时需要安装ffmpeg系统工具")
+        return False
+    except ffmpeg.Error as e:
+        print(f"❌ FFmpeg转换失败: {e.stderr.decode() if e.stderr else str(e)}")
+        return False
+    except Exception as e:
+        print(f"❌ 视频转换异常: {e}")
+        traceback.print_exc()
+        return False
+
+def get_video_info(file_path):
+    """获取视频文件信息"""
+    try:
+        import ffmpeg
+        probe = ffmpeg.probe(file_path)
+        
+        # 获取视频流信息
+        video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
+        
+        if video_stream:
+            return {
+                'codec': video_stream.get('codec_name', 'unknown'),
+                'duration': float(probe.get('format', {}).get('duration', 0)),
+                'width': video_stream.get('width', 0),
+                'height': video_stream.get('height', 0),
+                'format': probe.get('format', {}).get('format_name', 'unknown')
+            }
+        return None
+    except Exception as e:
+        print(f"获取视频信息失败: {e}")
+        return None
+
 def ensure_wechat_running_macos():
     """确保macOS微信程序正在运行"""
     try:
@@ -461,6 +521,199 @@ def send_audio():
         traceback.print_exc()
         return jsonify({"status": "error", "msg": f"发送微信失败: {e}"}), 500
 
+@app.route('/send_html', methods=['POST'])
+def send_html():
+    """发送HTML文件接口"""
+    data = request.get_json()
+    group_name = data.get("group_name")
+    html_content = data.get("html_content")
+    html_url = data.get("html_url")
+    message = data.get("message", "")
+    filename = data.get("filename", "document.html")
+
+    if not group_name:
+        return jsonify({"status": "error", "msg": "缺少参数：group_name"}), 400
+    
+    if not html_content and not html_url:
+        return jsonify({"status": "error", "msg": "需要提供 html_content 或 html_url 其中之一"}), 400
+
+    # 创建临时保存目录
+    os.makedirs("downloads", exist_ok=True)
+    
+    # 根据平台生成文件名格式
+    if platform.system() == "Windows":
+        date_str = datetime.now().strftime("%#m月%#d日")
+    else:  # macOS/Linux
+        date_str = datetime.now().strftime("%-m月%-d日")
+    
+    if not filename.endswith('.html'):
+        filename += '.html'
+    
+    file_name = f"{date_str}_{filename}"
+    file_name_sanitized = sanitize_filename(file_name)
+    local_path = os.path.join("downloads", file_name_sanitized)
+
+    try:
+        # 获取HTML内容
+        if html_url:
+            print(f"正在下载HTML: {html_url}")
+            r = requests.get(html_url, timeout=10)
+            r.encoding = 'utf-8'  # 确保中文编码正确
+            html_content = r.text
+        
+        # 保存HTML文件
+        with open(local_path, "w", encoding='utf-8') as f:
+            f.write(html_content)
+        print(f"HTML文件已保存至: {local_path}")
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "msg": f"处理HTML文件失败: {e}"}), 500
+
+    try:
+        # 根据平台选择发送方式
+        current_platform = platform.system()
+        print(f"当前平台: {current_platform}")
+        
+        if current_platform == "Windows":
+            send_audio_windows(group_name, message, local_path)
+        elif current_platform == "Darwin":  # macOS
+            # 确保微信正在运行
+            if not ensure_wechat_running_macos():
+                return jsonify({"status": "error", "msg": "无法启动微信，请手动打开微信后重试"}), 500
+            
+            # 使用macOS版本发送
+            if not send_wechat_message_macos(group_name, message, local_path):
+                raise Exception("macOS微信发送失败")
+        else:
+            return jsonify({"status": "error", "msg": f"不支持的平台: {current_platform}"}), 400
+            
+        return jsonify({"status": "success", "msg": "HTML文件发送成功"})
+            
+    except Exception as e:
+        print(f"❌ HTML文件发送过程出错: {e}")
+        traceback.print_exc()
+        return jsonify({"status": "error", "msg": f"发送HTML文件失败: {e}"}), 500
+
+@app.route('/send_video', methods=['POST'])
+def send_video():
+    """发送视频文件接口（支持格式转换）"""
+    data = request.get_json()
+    group_name = data.get("group_name")
+    video_url = data.get("video_url")
+    message = data.get("message", "")
+    filename = data.get("filename", "video")
+    force_convert = data.get("force_convert", False)  # 是否强制转换为mp4
+
+    if not group_name or not video_url:
+        return jsonify({"status": "error", "msg": "缺少参数：group_name 或 video_url"}), 400
+
+    # 创建临时保存目录
+    os.makedirs("downloads", exist_ok=True)
+    
+    # 根据平台生成文件名格式
+    if platform.system() == "Windows":
+        date_str = datetime.now().strftime("%#m月%#d日")
+    else:  # macOS/Linux
+        date_str = datetime.now().strftime("%-m月%-d日")
+    
+    # 从URL获取文件扩展名
+    original_ext = os.path.splitext(video_url.split('?')[0])[-1].lower()
+    if not original_ext:
+        original_ext = '.mp4'  # 默认扩展名
+    
+    original_filename = f"{date_str}_{filename}_original{original_ext}"
+    original_filename_sanitized = sanitize_filename(original_filename)
+    original_path = os.path.join("downloads", original_filename_sanitized)
+    
+    # MP4文件路径
+    mp4_filename = f"{date_str}_{filename}.mp4"
+    mp4_filename_sanitized = sanitize_filename(mp4_filename)
+    mp4_path = os.path.join("downloads", mp4_filename_sanitized)
+
+    try:
+        # 下载原始视频文件
+        print(f"正在下载视频: {video_url}")
+        r = requests.get(video_url, timeout=30, stream=True)
+        
+        with open(original_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        
+        print(f"视频已下载至: {original_path}")
+        
+        # 获取视频信息
+        video_info = get_video_info(original_path)
+        if video_info:
+            print(f"视频信息: {video_info}")
+        
+        # 确定最终发送的文件路径
+        final_path = original_path
+        
+        # 检查是否需要转换
+        need_convert = force_convert or (original_ext.lower() not in ['.mp4', '.m4v'])
+        
+        if need_convert:
+            print(f"检测到需要转换格式: {original_ext} -> .mp4")
+            
+            if convert_video_to_mp4(original_path, mp4_path):
+                final_path = mp4_path
+                print(f"使用转换后的MP4文件: {final_path}")
+                
+                # 删除原始文件以节省空间
+                try:
+                    os.remove(original_path)
+                    print(f"已删除原始文件: {original_path}")
+                except:
+                    pass
+            else:
+                print("⚠️ 视频转换失败，使用原始文件")
+                final_path = original_path
+        else:
+            print("视频格式无需转换")
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "msg": f"下载或转换视频失败: {e}"}), 500
+
+    try:
+        # 根据平台选择发送方式
+        current_platform = platform.system()
+        print(f"当前平台: {current_platform}")
+        
+        if current_platform == "Windows":
+            send_audio_windows(group_name, message, final_path)
+        elif current_platform == "Darwin":  # macOS
+            # 确保微信正在运行
+            if not ensure_wechat_running_macos():
+                return jsonify({"status": "error", "msg": "无法启动微信，请手动打开微信后重试"}), 500
+            
+            # 使用macOS版本发送
+            if not send_wechat_message_macos(group_name, message, final_path):
+                raise Exception("macOS微信发送失败")
+        else:
+            return jsonify({"status": "error", "msg": f"不支持的平台: {current_platform}"}), 400
+            
+        # 返回成功信息，包含视频信息
+        response_data = {
+            "status": "success", 
+            "msg": "视频文件发送成功",
+            "original_format": original_ext,
+            "final_format": ".mp4" if need_convert and os.path.exists(mp4_path) else original_ext,
+            "converted": need_convert and os.path.exists(mp4_path)
+        }
+        
+        if video_info:
+            response_data["video_info"] = video_info
+            
+        return jsonify(response_data)
+            
+    except Exception as e:
+        print(f"❌ 视频发送过程出错: {e}")
+        traceback.print_exc()
+        return jsonify({"status": "error", "msg": f"发送视频失败: {e}"}), 500
+
 @app.route('/platform', methods=['GET'])
 def get_platform_info():
     """获取平台信息"""
@@ -480,7 +733,9 @@ if __name__ == '__main__':
     print(f"🔧 支持的平台: Windows (wxauto), macOS (AppleScript)")
     print(f"🌐 服务地址: http://0.0.0.0:8899")
     print(f"📊 接口列表:")
-    print(f"   - POST /send - 发送微信消息（跨平台）")
+    print(f"   - POST /send - 发送微信音频文件（跨平台）")
+    print(f"   - POST /send_html - 发送HTML文件（跨平台）")
+    print(f"   - POST /send_video - 发送视频文件（跨平台，支持格式转换）")
     print(f"   - POST /record - 录制音频播放（需要playwright）")
     print(f"   - GET /platform - 查看平台信息")
     app.run(host='0.0.0.0', port=8899)

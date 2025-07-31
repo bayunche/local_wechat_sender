@@ -11,6 +11,16 @@ pywin32>=306; sys_platform == "win32"
 # 可选依赖（录制功能）
 playwright>=1.40.0
 
+# 视频处理依赖（视频发送功能）
+ffmpeg-python>=0.2.0
+
+# 系统要求和注意事项：
+# 
+# 视频转换功能需要安装FFmpeg系统工具：
+# - Windows: 下载 https://ffmpeg.org/download.html 并添加到系统PATH
+# - macOS: brew install ffmpeg
+# - Linux: sudo apt-get install ffmpeg
+#
 # macOS用户注意事项：
 # 1. 确保系统偏好设置 -> 安全性与隐私 -> 辅助功能 中已启用终端或Python的访问权限
 # 2. 确保微信已安装在 /Applications/WeChat.app
